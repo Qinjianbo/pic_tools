@@ -1,0 +1,3 @@
+[submodule "codex-automation-scripts"]
+	path = codex-automation-scripts
+	url = git@github.com:Qinjianbo/codex-automation-scripts.git
