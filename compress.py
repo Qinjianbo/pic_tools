@@ -10,6 +10,7 @@ Usage examples:
 
 import argparse
 import io
+import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -132,6 +133,20 @@ def compress_image(
         output_path = input_path.with_stem(input_path.stem + "_compressed").with_suffix(f".{suffix}")
 
     output_path.write_bytes(best_blob)
+
+    if best_size > target_kb:
+        print(
+            "Warning: target {target} KB not reachable; saved best effort {actual} KB at {w}x{h} (quality {quality}).".format(
+                target=target_kb,
+                actual=best_size,
+                w=best_dims[0],
+                h=best_dims[1],
+                quality=best_quality,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     return output_path, best_size, best_dims, fmt, best_quality
 
 

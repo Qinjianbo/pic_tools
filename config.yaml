@@ -11,7 +11,7 @@ codex_cli: ~/.nvm/versions/node/v22.18.0/lib/node_modules/@openai/codex/bin/code
 #   gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini
 # (Model names current as of Jan 30, 2026.)
 codex_model_default: gpt-5.2
-codex_model_iterate: gpt-5.1-codex--mini
+codex_model_iterate: gpt-5.1-codex-mini
 codex_model_plan: gpt-5.2
 codex_model_exec: gpt-5.1-codex-max
 codex_model_commit: gpt-5.1-codex-mini
