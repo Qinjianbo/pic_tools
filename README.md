@@ -52,6 +52,13 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
   - 超大图：在极低 `--target-kb` 下，5% 质量步长 + 0.9 尺寸步长是否收敛过慢；建议加入耗时日志、`--max-iter` 或根据目标 KB 自动收紧 `min_side` 的试验。
   - 搜索策略：评估二分/自适应步长对收敛速度与最终观感的影响，保持默认步长稳定但记录可调参数用于后续 A/B。
 
+### 触发阈值与提示表（透明 / 调色板 / 超大图）
+| 场景 (Scenario) | 默认/强制格式与透明处理 | 质量搜索 → 尺寸递减的触发点 | 提示与退出码 |
+| --- | --- | --- | --- |
+| 透明 PNG（RGBA/LA） | 默认自动改存 WEBP；保存 JPEG/WebP 时按 `--bg-color` 铺底，当前会丢失 alpha；强制 `--format png` 时保留透明但仅受 `compress_level=9` 影响 | 质量从 `--quality` 开始每次减 5 直到 `--min-quality`（默认 90 → 40）；仍超标则每轮尺寸 × `resize_step`（默认 0.9），短边不低于 `min_side`=320；设置 `max-width/height` 会在循环前一次性缩放 | 达标无额外提示；不可达打印 `Warning: target ...` 并退出码 1；透明被铺底无内建提示（在回归说明中标注风险） |
+| 调色板 PNG（P，含/不含透明索引） | 默认走 JPEG（palette 会被展开为 RGB）；强制 `png` 保留 palette/transparency；强制 WebP/JPEG 时 palette → RGB | PNG 路径：质量参数无效，首轮超标后直接进入 0.9 缩放直至 `min_side`；JPEG/WebP 路径按质量阶梯，超标后才缩放 | palette → RGB、透明索引丢失时无额外提示；目标过低时同样以 Warning + 退出码 1 告知不可达 |
+| 超大图（任意模式） | 格式按默认/显式；透明规则同上 | 循环前先套 `max-width/height` 约束；若首轮已 ≤ 目标则停在较高质量（常为 90）；若目标极低则质量降到 `min-quality` 后进入 0.9 缩放到 `min_side` | 达不到目标时 Warning + 退出码 1；建议在日志中记录“裁剪前后尺寸/质量”用于诊断（待实现） |
+
 ## Tips for tiny files that stay clear
 - Prefer `--format webp` for photographic or text-heavy banners.
 - Set a realistic target: most 1920px-wide banners look good between 60-120 KB as WebP.
@@ -61,7 +68,7 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
 - `banner.png` (1.6 MB, 2540x965) -> `banner_compressed.webp` (~61 KB，2540x965) using `python compress.py banner.png --target-kb 80 --format webp`.
 
 ## 手动回归清单（最小覆盖）
-> 资产复现：无需下载额外素材，运行以下一次性脚本生成 5 张样例图（需 Pillow 已安装）：
+> 资产复现：无需下载额外素材，运行以下一次性脚本生成 6 张样例图（需 Pillow 已安装）：
 >
 > ```bash
 > source .venv/bin/activate 2>/dev/null || true
@@ -89,6 +96,12 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
 > [palette.extend(c) for c in colors]; palette += [0,0,0]*(256-len(colors)); img.putpalette(palette)
 > d=ImageDraw.Draw(img); d.rectangle([40,40,600,600],fill=3,outline=0,width=6); d.rectangle([120,120,520,520],fill=2,outline=0,width=4); d.text((180,300),'ICON',fill=1)
 > img.save(root/'icon.png')
+> # 调色板 + 透明索引（P + tRNS）
+> img=Image.new('P',(640,640)); palette=[]; colors=[(0,0,0),(255,255,255),(46,134,222),(255,99,71),(106,190,48),(255,209,102),(140,104,255),(30,30,30)]
+> [palette.extend(c) for c in colors]; palette += [0,0,0]*(256-len(colors)); img.putpalette(palette)
+> img.info['transparency'] = 0  # index 0 设为透明
+> d=ImageDraw.Draw(img); d.rectangle([50,50,590,590],fill=2,outline=7,width=5); d.rectangle([140,140,500,500],fill=3,outline=1,width=4); d.text((170,300),'P+ALPHA',fill=4)
+> img.save(root/'icon_alpha.png')
 > print('Samples ready in ./samples')
 > PY
 > ```
@@ -98,6 +111,7 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
 - 插画/文字：`python compress.py samples/poster.png --target-kb 100 --min-quality 60` → 40–80 KB，保持 1500x2000，质量不低于 60，退出码 0。
 - 超大原图：`python compress.py samples/huge.jpg --target-kb 200 --max-width 2000` → 先缩到 ≤2000 宽后约 60–120 KB（质量通常停在 90），退出码 0；若目标极低可能在 `--min-side` 触顶并返回 1。
 - 强制 PNG：`python compress.py samples/icon.png --target-kb 80 --format png` → 体积通常 ≥2 KB，尺寸 640x640；若目标过低会打印“不可达”警告并退出码 1，用于提示 PNG 无损限制。
+- 调色板 + 透明：`python compress.py samples/icon_alpha.png --target-kb 40 --format png` → palette 与透明索引保留，质量参数不生效；若目标继续压到 <30 KB 会进入 0.9 等比缩放，尺寸触达 `min_side` 后仍超标则 Warning + 退出码 1。若强制 `--format webp/jpeg` 透明会被铺底并放大体积（预期 3–8 KB）。
 
 ## 批量处理分层与命名/冲突指南
 - 单图（已实现）：输入文件 → `<stem>_compressed.<ext>`；显式 `-o` 完全覆盖命名/路径，原文件不被覆盖。示例：`python compress.py banner.png --target-kb 80 -o out/banner.webp`。
@@ -107,7 +121,8 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
     - 默认：若目标文件已存在则跳过并在日志中标记 `SKIP (exists)`。
     - `--overwrite`: 允许覆盖已存在输出。
     - `--versioned`: 在文件名后追加 `_v2`, `_v3` 递增后缀，避免覆盖。
-  - 示例：`python compress.py assets/ --target-kb 90 --output-dir dist/ --overwrite` → `assets/hero.png` 写到 `dist/assets/hero_compressed.png`。
+  - 示例 1：`python compress.py assets/ --target-kb 90 --output-dir dist/ --overwrite` → `assets/hero.png` 写到 `dist/assets/hero_compressed.png`；若 dist 已有同名则覆盖并在日志中标记 `OVERWRITE`.
+  - 示例 2：`python compress.py assets/**/*.png --target-kb 120 --output-dir dist/ --versioned` → 默认跳过已存在；若启用 `--versioned` 则生成 `*_compressed_v2` 并在日志中标记 `NEW (v2)`；未传覆盖/版本化则打印 `SKIP (exists)`。
 - 预设/配置（计划）：
   - 通过 `--config preset.yaml` 读取默认 `target_kb/format/min_side` 等参数；命令行显式参数优先于配置，配置优先于内置默认。
   - 批量输出命名仍遵循 `_compressed` 规则，配置可选项允许自定义后缀（例如 `output_suffix: _opt`）。
@@ -127,5 +142,16 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
   - README 最小回归命令串行跑通（至少横幅、透明/铺底、强制 PNG 三条），断言退出码、尺寸上限及“不可达”警告出现与否。  
   - 若 CI 环境缺 WebP，可分两路：一组启用 WebP 的 job、另一组禁用后验证 fallback 文案。  
 - 退出码契约：不可达目标返回 1 且仍写文件；CI 应检查 stderr 警告存在，stdout 摘要格式稳定。  
-- 依赖声明：文档/requirements 注明 Pillow 版本下限与 WebP 可选特性，示例安装命令含 `[webp]` 选项。  
+- 依赖声明：文档/requirements 注明 Pillow 版本下限与 WebP 可选特性，示例安装命令含 `[webp]` 选项。
 - 发布形态调研：对比“单文件脚本 + release asset” vs “pip 包 + entry point”；记录构建/上传步骤与潜在 CI 配置需求（如 GitHub Actions + PyPI token 或 Release 产物上传）。
+- WebP 可用性自检的 CI 检查点与提示语（补充）：  
+  - `features.check("webp")` / `features.check("webp_anim")` / `features.check_codec("webp", "encoder")` 结果写入日志；缺失时在摘要中追加 `[webp-disabled]`。  
+  - 显式 `--format webp` 且不可用时：stderr 打印 `WebP encoder unavailable, fallback to JPEG (install pillow[webp])`，退出码保持 1 以便 CI 发现。  
+  - 默认格式从 WebP 回退到 JPEG 时：stdout 摘要后缀 `(fallback=jpeg)`，仍视为成功路径供回归核对。  
+  - CI 断言：禁用 WebP 的 job 需检测到上述提示文本；启用 WebP 的 job 需确认无 fallback 标记且能保存 RGBA → WebP（透明不丢失）。
+- 入口命令 / 版本兼容验证待办清单：  
+  - [ ] 提供 `pic-deal`（或同名）控制台入口包装 `compress.py`，附 `--version` 输出。  
+  - [ ] 在 README/INSTALL.md 补充安装与入口示例（pip + 本地脚本双路径）。  
+  - [ ] CI 运行最小命令矩阵（Python 3.8/3.10/3.12，含/不含 WebP），验证入口命令可执行、摘要格式稳定。  
+  - [ ] 版本号与 CHANGELOG 发布节奏：定义语义化版本规则，打包/发布前需更新 changelog，并运行回归脚本集合。  
+  - [ ] 可选：为入口命令添加 `--self-check` 触发 WebP/依赖自检，脚本/文档需说明预期输出与退出码。
