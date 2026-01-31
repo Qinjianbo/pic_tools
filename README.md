@@ -42,22 +42,15 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
 3) If quality bottoms out, gently rescales using `resize-step` until the target or `min-side` is reached.
 
 ## 压缩策略与场景梳理
-- 质量搜索：起始质量默认为 90，每轮减 5 直到 `--min-quality`（默认 40）或迭代 60 次；只要出现更小的结果就记录为最佳，不做二分搜索。
-- 尺寸递减：当质量已到底仍超标时，按 `resize-step`（默认 0.9）等比缩放，最短边不低于 `--min-side`；使用 `LANCZOS` 插值，若缩放后尺寸未变则提前停止。
-- 当前覆盖案例：
-  - 透明 PNG/Alpha：源图为 `RGBA` 时默认切换 WebP；透明会被 `--bg-color` 铺底后再编码。
-  - 调色板/插画：`P` 模式保存 JPEG/WebP 时自动转 RGB，无额外量化；PNG 输出保留调色板但只调 `compress_level`。
-  - 超大图：先应用 `--max-width/--max-height` 再进入质量→尺寸循环，可与 `min_side` 共同约束尺寸底线。
-- 未自动化的缺口（“提升压缩效果与鲁棒性”着力点）：
-  - 透明保持：缺少“透明 WebP 保留 alpha”的条件分支及对比实验；未覆盖透明/不透明两路自动测试。
-  - 调色板优化：未做自适应量化或 palette 优化，RGB 转换可能放大体积或丢色阶；缺少可重复的质量/体积比对脚本。
-  - 极端大图：未做分段降采样或内存保护测试；对 >10k 像素输入的耗时/内存缺乏基准。
-  - 搜索策略：质量步长固定 5%；未提供二分或自适应跳步模式；`min_side` 仅单一阈值，无法根据目标 KB 自动收紧。
-- 可复现场景（含验证点）：
-  - 透明 PNG：`python compress.py transparent.png --target-kb 80` → 预期输出 WebP 且透明被铺成 `--bg-color`；验证透明丢失及警告无。
-  - 调色板图标：`python compress.py palette.png --target-kb 30 --format jpeg` → 颜色被转为 RGB；需检查色阶丢失、体积变化。
-  - 超大原图：`python compress.py huge.jpg --target-kb 200 --max-width 2000` → 先降到 ≤2000 宽，再逐步降质/降尺寸；验证 `min_side` 保护是否生效。
-  - 强制 PNG：`python compress.py icon.png --target-kb 80 --format png` → 若无法达到目标，预期 stderr 警告 + 退出码 1；仍会写出最佳结果。
+- 核心阈值：起始质量 90，每轮递减 5 直至 `--min-quality`（默认 40）或 60 轮；若仍超标再按 `resize-step`=0.9 等比缩放，短边不低于 `--min-side`（默认 320）。`--max-width/--max-height` 在循环前就先行裁到上限。
+- 透明 PNG / Alpha：源为 `RGBA` 时默认改存 WebP；保存 JPEG/WebP 会先按 `--bg-color` 铺底，当前会丢失 Alpha。若强制 `--format png`，只受 `compress_level=9` 影响，质量参数和尺寸搜索不会生效。
+- 调色板 / P 模式：输出 JPEG/WebP 前会自动 `convert('RGB')`，调色板被展开，体积可能放大；PNG 路径保留 palette，但仅能调压缩级别，无法通过质量迭代获得更小体积。
+- 超大图：先套用 `max-width/height`，再跑质量→尺寸循环；当尺寸约束已把体积压到目标附近时（如 5200x3200 → 2000x1230，质量保持 90，~70 KB），后续循环不会降质，保证清晰度但需留意是否过早停在高质量。
+- 搜索/缩放的风险与监控（支撑“提升压缩效果与鲁棒性”）：
+  - 透明：需要验证“保留 alpha 的 WebP”分支 vs 现有铺底方案；当用户强制 PNG 且不可达目标时，应提前提示“PNG 无损，质量/尺寸参数无法生效”。
+  - 调色板：可选 palette 量化或 lossless WebP 的实验；记录 palette→RGB 后的体积增幅与色块失真，必要时提供 `--quantize` 或“保持 palette”开关。
+  - 超大图：在极低 `--target-kb` 下，5% 质量步长 + 0.9 尺寸步长是否收敛过慢；建议加入耗时日志、`--max-iter` 或根据目标 KB 自动收紧 `min_side` 的试验。
+  - 搜索策略：评估二分/自适应步长对收敛速度与最终观感的影响，保持默认步长稳定但记录可调参数用于后续 A/B。
 
 ## Tips for tiny files that stay clear
 - Prefer `--format webp` for photographic or text-heavy banners.
@@ -68,23 +61,71 @@ The tool creates `<name>_compressed.<ext>` when `-o/--output` is not provided.
 - `banner.png` (1.6 MB, 2540x965) -> `banner_compressed.webp` (~61 KB，2540x965) using `python compress.py banner.png --target-kb 80 --format webp`.
 
 ## 手动回归清单（最小覆盖）
-- 横幅照片（repo 内 banner）：`python compress.py banner.png --target-kb 80` → 期望 60-90 KB，保持 2540x965，退出码 0。
-- 透明 UI：`python compress.py transparent.png --target-kb 60 --format webp` → 目前会铺底（缺口记录），输出提示行 + 退出码 0；用于回归透明行为。
-- 插画/文字：`python compress.py poster.png --target-kb 100 --min-quality 60` → 期望质量不低于 60、尺寸不低于 `--min-side`，退出码 0。
-- 超大原图：`python compress.py huge.jpg --target-kb 200 --max-width 2000` → 期望先缩到 <=2000 宽，再压到 <200 KB 或返回 1（不可达时仍保存最佳）。
-- 强制 PNG：`python compress.py icon.png --target-kb 80 --format png` → 若无法达到目标会警告并返回 1；用于提醒 PNG 无损体积限制。
+> 资产复现：无需下载额外素材，运行以下一次性脚本生成 5 张样例图（需 Pillow 已安装）：
+>
+> ```bash
+> source .venv/bin/activate 2>/dev/null || true
+> python - <<'PY'
+> from pathlib import Path
+> from PIL import Image, ImageDraw
+> root = Path('samples'); root.mkdir(exist_ok=True)
+> # 透明 UI
+> w,h = 1280,720; img = Image.new('RGBA',(w,h),(0,0,0,0)); d=ImageDraw.Draw(img)
+> for i in range(0,h,10): d.rectangle([0,i,w,i+10], fill=(30,144,255,int(255*i/h)))
+> d.rounded_rectangle([200,150,1080,570],40,(255,255,255,160),(0,0,0,120),4)
+> d.text((240,320),'Transparent UI',fill=(0,0,0,200)); img.save(root/'transparent.png')
+> # 插画/文字
+> w,h = 1500,2000; img = Image.new('RGB',(w,h),(248,244,237)); d=ImageDraw.Draw(img)
+> colors=[(239,112,96),(58,134,255),(95,207,128),(255,201,71)]
+> for i,c in enumerate(colors):
+>     d.rectangle([100,150+i*200,w-100,300+i*200],fill=c)
+>     d.text((140,180+i*200),f'Layer {i+1} text',fill=(30,30,30))
+> d.text((400,1700),'Poster/Text Stress',fill=(60,60,60)); img.save(root/'poster.png',quality=95)
+> # 超大渐变
+> w,h=5200,3200; x=Image.linear_gradient('L').resize((w,h)); y=Image.linear_gradient('L').rotate(90,expand=True).resize((w,h))
+> Image.merge('RGB',(x,y,x.transpose(Image.FLIP_LEFT_RIGHT))).save(root/'huge.jpg',quality=95)
+> # 调色板图标
+> img=Image.new('P',(640,640)); palette=[]; colors=[(0,0,0),(255,255,255),(255,99,71),(46,134,222),(106,190,48),(255,209,102),(140,104,255),(30,30,30)]
+> [palette.extend(c) for c in colors]; palette += [0,0,0]*(256-len(colors)); img.putpalette(palette)
+> d=ImageDraw.Draw(img); d.rectangle([40,40,600,600],fill=3,outline=0,width=6); d.rectangle([120,120,520,520],fill=2,outline=0,width=4); d.text((180,300),'ICON',fill=1)
+> img.save(root/'icon.png')
+> print('Samples ready in ./samples')
+> PY
+> ```
 
-## 批量处理分层草案
-- 单图（已实现）：输入文件 → `<stem>_compressed.<ext>`，显式 `-o` 优先；不覆盖原文件。示例：`python compress.py banner.png --target-kb 80 -o out/banner.webp`。
-- 多图/目录（计划）：接受目录或通配符输入（如 `assets/*.png`），输出默认复刻目录结构并追加 `_compressed` 后缀；预期提供 `--output-dir` 统一指定根目录。冲突处理建议：默认跳过已存在输出；可选 `--overwrite` 覆盖或 `--versioned` 追加 `_v2` 等后缀。示例：`python compress.py assets/ --target-kb 90 --output-dir dist/ --overwrite`。
-- 预设/配置（计划）：支持传入配置文件（如 `--config preset.yaml`）或命令组复用目标 KB、格式、最短边等参数；命名策略沿用 `_compressed`，但允许配置覆盖；批量模式下命令行优先级最高，其次配置文件，最后默认。示例：`python compress.py list.txt --config presets/web.yml --format webp`。
-- 覆盖策略原则：显式优先（命令行 > 配置 > 默认）；批量默认不覆盖，提供跳过/覆盖/版本化三选项，并在冲突时输出决策摘要以便回溯。
+- 横幅照片：`python compress.py banner.png --target-kb 80` → 期望 60–90 KB，保持 2540x965，输出 WebP，退出码 0。
+- 透明 UI：`python compress.py samples/transparent.png --target-kb 60 --format webp` → 约 5–8 KB，尺寸不变；目前会铺底丢失透明（缺口记录），无警告，退出码 0。
+- 插画/文字：`python compress.py samples/poster.png --target-kb 100 --min-quality 60` → 40–80 KB，保持 1500x2000，质量不低于 60，退出码 0。
+- 超大原图：`python compress.py samples/huge.jpg --target-kb 200 --max-width 2000` → 先缩到 ≤2000 宽后约 60–120 KB（质量通常停在 90），退出码 0；若目标极低可能在 `--min-side` 触顶并返回 1。
+- 强制 PNG：`python compress.py samples/icon.png --target-kb 80 --format png` → 体积通常 ≥2 KB，尺寸 640x640；若目标过低会打印“不可达”警告并退出码 1，用于提示 PNG 无损限制。
+
+## 批量处理分层与命名/冲突指南
+- 单图（已实现）：输入文件 → `<stem>_compressed.<ext>`；显式 `-o` 完全覆盖命名/路径，原文件不被覆盖。示例：`python compress.py banner.png --target-kb 80 -o out/banner.webp`。
+- 多图/目录（计划）：
+  - 输入可为目录或通配符（如 `assets/**/*.png`），输出默认复刻相对路径并在文件名追加 `_compressed`，写入 `--output-dir`（默认与输入同目录）。
+  - 命名冲突处理（仅计划）：
+    - 默认：若目标文件已存在则跳过并在日志中标记 `SKIP (exists)`。
+    - `--overwrite`: 允许覆盖已存在输出。
+    - `--versioned`: 在文件名后追加 `_v2`, `_v3` 递增后缀，避免覆盖。
+  - 示例：`python compress.py assets/ --target-kb 90 --output-dir dist/ --overwrite` → `assets/hero.png` 写到 `dist/assets/hero_compressed.png`。
+- 预设/配置（计划）：
+  - 通过 `--config preset.yaml` 读取默认 `target_kb/format/min_side` 等参数；命令行显式参数优先于配置，配置优先于内置默认。
+  - 批量输出命名仍遵循 `_compressed` 规则，配置可选项允许自定义后缀（例如 `output_suffix: _opt`）。
+  - 示例：`python compress.py list.txt --config presets/web.yml --format webp` → 若配置未指定 `format`，以命令行 `webp` 为准；输出文件统一追加 `_compressed` 或配置的后缀。
+- 冲突处理原则（适用于多图/配置未来实现）：显式优先（命令行 > 配置 > 默认）；批量默认不覆盖，提供跳过/覆盖/版本化三选项；在冲突时输出决策摘要以便回溯。
 
 ## 工程化发布准备（草案）
 - 关键步骤：定义发布形态（单脚本 or 包）、添加版本号与 changelog 流程、引入基础 CI（lint + 示例命令跑通）、验证 Pillow/WebP 兼容性并给出 fallback、打包/分发指引。
-- 今日可做重点与待验证清单：  
-  - WebP 可用性自检：启动时 `PIL.features.check(\"webp\")`，不可用时降级 JPEG 并在摘要中提示；需要小样本验证无 WebP 环境的行为。  
-  - CI 验证项：在 CI 跑通 README 的最小回归命令（见“手动回归清单”），至少覆盖横幅、强制 PNG、透明 WebP 铺底三个场景；同时添加 `python -m compileall compress.py` 作为快速语法守护。  
-  - 退出码契约：对“不可达目标”确保返回 1 且仍写出文件，CI 中断言 stderr 警告存在。  
-  - 依赖声明：确认 `requirements.txt`/文档中列出 Pillow 版本下限；评估是否需要 `python -m pip install pillow[webp]` 的说明。  
-  - 发布形态调研：比对“单文件脚本 + release asset” vs “pip 包 + entry point”；记录构建/上传步骤与潜在 CI 配置需求。
+- WebP 可用性自检流程（建议纳入启动或 CI 前置）：  
+  1) `from PIL import features`; 使用 `features.check("webp")` 判定编解码支持（解码/编码可分开检查）。  
+  2) 若不支持：  
+     - 运行时：回退默认输出格式为 JPEG，并在 stdout 摘要追加 `[webp-disabled]` 标记；当用户显式 `--format webp` 时给出可操作错误/提示“当前环境未启用 WebP，请安装 pillow 带 webp 或编译支持”。  
+     - 文档/提示：提示安装 `pip install "pillow[webp]"` 或使用发行版已启用 WebP 的构建。  
+  3) 可选深度自检：生成 1x1 RGBA 临时图尝试保存 WebP，捕获异常并打印明确 fallback 文案（例如 `Fallback to JPEG because WebP encoder unavailable`).  
+- CI 验证项（建议）：  
+  - `python -m compileall compress.py`：语法守护。  
+  - README 最小回归命令串行跑通（至少横幅、透明/铺底、强制 PNG 三条），断言退出码、尺寸上限及“不可达”警告出现与否。  
+  - 若 CI 环境缺 WebP，可分两路：一组启用 WebP 的 job、另一组禁用后验证 fallback 文案。  
+- 退出码契约：不可达目标返回 1 且仍写文件；CI 应检查 stderr 警告存在，stdout 摘要格式稳定。  
+- 依赖声明：文档/requirements 注明 Pillow 版本下限与 WebP 可选特性，示例安装命令含 `[webp]` 选项。  
+- 发布形态调研：对比“单文件脚本 + release asset” vs “pip 包 + entry point”；记录构建/上传步骤与潜在 CI 配置需求（如 GitHub Actions + PyPI token 或 Release 产物上传）。
